@@ -213,49 +213,59 @@ curl "http://localhost:9500/discover?query=translate+this+to+Spanish"
 
 The `SkillMatcher` scores each agent's skills against the query by checking skill names, descriptions, tags, and examples. The agent with the highest-scoring skills is returned.
 
-## Architecture (Production)
+## Architecture (Production — Zero Cost)
 
-The registry is a stateless microservice. The database is a separate service.
+All components scale to zero. No cost when idle.
 
 ```
 ┌──────────────────────┐       ┌──────────────────┐
-│  cs-agent-registry   │──────>│  Cloud SQL (PG)  │
-│  Cloud Run :9500     │       │  Managed DB      │
-│  (stateless)         │       └──────────────────┘
+│  cs-agent-registry   │──────>│  Neon Postgres   │
+│  Cloud Run :9500     │       │  (serverless)    │
+│  min-instances: 0    │       │  free: 0.5 GB    │
+│  256Mi / 1 vCPU      │       └──────────────────┘
 └──────────────────────┘
          │
          ├── cs-agent-service (:9100) reads config at startup
          └── LiteLLM registers public agents
 ```
 
+| Component | Cost when idle | Free tier |
+|---|---|---|
+| Cloud Run | $0 (scale to zero) | 2M requests/month |
+| Neon Postgres | $0 (scale to zero) | 0.5 GB storage |
+| Artifact Registry | ~$0.10/GB/month | 0.5 GB free |
+| Secret Manager | $0 | 6 active versions free |
+| Cloud Build | $0 | 120 min/day free |
+
 ## Storage
 
 | Mode | Config | Description |
 |------|--------|-------------|
 | **Memory** | _(default, dev only)_ | In-memory, data lost on restart |
-| **PostgreSQL** | `DATABASE_URL=postgresql+asyncpg://...` | **Required for production**, uses `registry` schema |
-
-The PostgreSQL database should be a managed service (Cloud SQL, RDS, etc.), not running in the same container.
+| **Neon Postgres** | `DATABASE_URL=postgresql+asyncpg://...?sslmode=require` | **Production**, serverless, scale to zero |
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_URL` | _(none)_ | PostgreSQL connection (**required in production**) |
+| `DATABASE_URL` | _(none)_ | Neon Postgres connection (**required in production**) |
 | `LITELLM_URL` | `http://litellm:4000` | LiteLLM endpoint for agent registration |
 | `LITELLM_MASTER_KEY` | _(none)_ | LiteLLM master key (Secret Manager) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | _(none)_ | Phoenix/OTLP tracing (optional, see below) |
 
 ## Deployment
 
-Deployed to Cloud Run via Cloud Build. Secrets come from Secret Manager.
+Deployed to Cloud Run via Cloud Build. Secrets from GCP Secret Manager.
 
 ```bash
-# Secrets required in GCP Secret Manager:
-# - registry-database-url    → postgresql+asyncpg://user:pass@/registry?host=/cloudsql/project:region:instance
-# - litellm-master-key       → sk-...
+# 1. Create Neon project at https://neon.tech (free tier)
+#    Copy connection string: postgresql+asyncpg://user:pass@ep-xxx.neon.tech/registry?sslmode=require
 
-# Trigger build + deploy
+# 2. Store secrets in GCP Secret Manager
+gcloud secrets create registry-database-url --data-file=-  # paste Neon URL
+gcloud secrets create litellm-master-key --data-file=-      # paste key
+
+# 3. Build + deploy
 gcloud builds submit --config cloudbuild.yaml
 ```
 

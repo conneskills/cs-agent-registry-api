@@ -18,7 +18,7 @@ steps:
       - --all-tags
       - us-central1-docker.pkg.dev/$PROJECT_ID/cs-agent-registry-api/cs-agent-registry-api
 
-  # Deploy to Cloud Run
+  # Deploy to Cloud Run (zero cost config)
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: gcloud
     args:
@@ -29,6 +29,11 @@ steps:
       - --region=us-central1
       - --port=9500
       - --allow-unauthenticated
+      - --min-instances=0
+      - --max-instances=2
+      - --memory=256Mi
+      - --cpu=1
+      - --cpu-throttling
       - --set-env-vars=LITELLM_URL=${_LITELLM_URL}
       - --set-secrets=DATABASE_URL=registry-database-url:latest,LITELLM_MASTER_KEY=litellm-master-key:latest
 

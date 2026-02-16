@@ -91,8 +91,10 @@ class PostgresStorage:
 
         self._engine = create_async_engine(
             self._database_url,
-            pool_size=5,
-            max_overflow=2,
+            pool_size=3,
+            max_overflow=1,
+            pool_pre_ping=True,  # reconnect on stale connections (Neon serverless)
+            pool_recycle=300,    # recycle connections every 5 min
             echo=False,
         )
 
