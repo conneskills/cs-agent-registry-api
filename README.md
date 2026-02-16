@@ -95,7 +95,34 @@ curl http://localhost:9500/health
 | `DATABASE_URL` | _(none)_ | PostgreSQL connection (enables persistence) |
 | `LITELLM_URL` | `http://litellm:4000` | LiteLLM endpoint for agent registration |
 | `LITELLM_MASTER_KEY` | _(none)_ | LiteLLM master key |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | _(none)_ | Phoenix/OTLP tracing (optional) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | _(none)_ | Phoenix/OTLP tracing (optional, see below) |
+
+## Observability (Optional)
+
+Tracing is **fully optional**. If `OTEL_EXPORTER_OTLP_ENDPOINT` is not set or Phoenix is unreachable, the service uses a no-op tracer and runs normally without any errors.
+
+```bash
+# Without tracing (default)
+uvicorn main:app --port 9500
+
+# With Phoenix tracing
+OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:4317 uvicorn main:app --port 9500
+```
+
+When using `docker-compose`, Phoenix is behind the `observability` profile:
+
+```bash
+# Without Phoenix
+docker compose up litellm postgres redis registry-api
+
+# With Phoenix
+docker compose --profile observability up
+```
+
+The `tracing.py` module handles all degradation gracefully:
+- No `OTEL_EXPORTER_OTLP_ENDPOINT` set → no-op tracer
+- OpenTelemetry packages not installed → no-op tracer
+- Phoenix unreachable at runtime → no-op tracer (no crash)
 
 ## Project Structure
 
