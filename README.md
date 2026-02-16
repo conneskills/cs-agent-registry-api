@@ -81,6 +81,95 @@ curl http://localhost:9500/agents
 curl http://localhost:9500/health
 ```
 
+## Skills, Tools & RAGs Injection
+
+Agents don't define their capabilities inline. Instead, you create **skills**, **tools**, and **RAG configs** as independent resources, then reference them by ID when creating an agent.
+
+### Step 1: Create resources
+
+```bash
+# Create a skill
+curl -X POST http://localhost:9500/skills \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "s-translate",
+    "name": "Translation",
+    "description": "Translate text between languages",
+    "tags": ["translation", "language"],
+    "examples": ["translate this to Spanish", "convert to French"]
+  }'
+
+# Create a tool
+curl -X POST http://localhost:9500/tools \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "t-websearch",
+    "name": "Web Search",
+    "description": "Search the web for information",
+    "provider": "mcp",
+    "mcp_server": "brave-search",
+    "mcp_tool_name": "search"
+  }'
+
+# Create a RAG config
+curl -X POST http://localhost:9500/rag \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "r-docs",
+    "name": "Documentation KB",
+    "rag_type": "vector_store",
+    "vector_store_provider": "pgvector",
+    "embedding_model": "text-embedding-ada-002",
+    "top_k": 5
+  }'
+```
+
+### Step 2: Inject into an agent
+
+Reference the resource IDs via `skill_ids`, `tool_ids`, and `rag_ids`:
+
+```bash
+curl -X POST http://localhost:9500/agents \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Research Agent",
+    "description": "Researches and translates content",
+    "url": "http://my-agent:8000",
+    "skill_ids": ["s-translate"],
+    "tool_ids": ["t-websearch"],
+    "rag_ids": ["r-docs"],
+    "tags": ["research"]
+  }'
+```
+
+The API resolves each ID from storage and embeds the full resource data into the `CompleteAgentCard`. The resulting agent contains complete copies of each skill, tool, and RAG config — not just the IDs.
+
+### How resolution works
+
+```
+POST /agents { skill_ids: ["s-translate"], tool_ids: ["t-websearch"], rag_ids: ["r-docs"] }
+       │
+       ▼
+  storage.get("skills", "s-translate")    → SkillDefinition
+  storage.get("tools", "t-websearch")     → ToolDefinition
+  storage.get("rag_configs", "r-docs")    → RAGConfig
+       │
+       ▼
+  CompleteAgentCard (stored with full embedded data)
+```
+
+> **Note:** Data is denormalized at creation time. If you update a skill after it's been injected into an agent, the agent keeps the old copy. To pick up changes, update the agent with `PUT /agents/{id}` using the same `skill_ids`.
+
+### Discovery
+
+The `/discover` endpoint uses skills to match agents to natural language queries:
+
+```bash
+curl "http://localhost:9500/discover?query=translate+this+to+Spanish"
+```
+
+The `SkillMatcher` scores each agent's skills against the query by checking skill names, descriptions, tags, and examples. The agent with the highest-scoring skills is returned.
+
 ## Storage
 
 | Mode | Config | Description |
