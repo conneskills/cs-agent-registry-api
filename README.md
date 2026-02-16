@@ -50,36 +50,113 @@ docker run -p 9500:9500 registry-api
 ## API Examples
 
 ```bash
-# Create a prompt
-curl -X POST http://localhost:9500/prompts \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "researcher",
-    "template": "You are a research agent specialized in {domain}. Find accurate information.",
-    "variables": ["domain"],
-    "tags": ["research"]
-  }'
-
-# Create a dynamic agent (sequential pipeline)
-curl -X POST http://localhost:9500/agents \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Research Pipeline",
-    "description": "Sequential: researcher → analyzer",
-    "url": "",
-    "execution_type": "sequential",
-    "roles": [
-      {"name": "researcher", "prompt_ref": "<prompt-id>", "tools": ["Bash","Read","WebSearch"]},
-      {"name": "analyzer", "prompt_inline": "Analyze the research results.", "tools": ["Bash","Read"]}
-    ]
-  }'
-
 # List all agents
 curl http://localhost:9500/agents
 
 # Health check
 curl http://localhost:9500/health
 ```
+
+## Prompts
+
+There are two ways to give a prompt to an agent role: **inline** (simple) or **by reference** (shared/versioned).
+
+### Option A: Inline prompt (simplest)
+
+Put the prompt directly in the role. No extra steps needed.
+
+```bash
+curl -X POST http://localhost:9500/agents \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "My Agent",
+    "description": "Simple agent with inline prompt",
+    "url": "http://my-agent:9100",
+    "execution_type": "single",
+    "roles": [
+      {
+        "name": "researcher",
+        "prompt_inline": "You are a research agent. Find accurate information about the given topic.",
+        "tools": ["Bash", "Read", "WebSearch"]
+      }
+    ]
+  }'
+```
+
+That's it. The agent container reads this config and uses the prompt directly.
+
+### Option B: Prompt reference (shared across agents)
+
+Use this when multiple agents share the same prompt, or when you want to update a prompt without redeploying agents.
+
+**Step 1** — Create the prompt (the `name` is the key):
+
+```bash
+curl -X POST http://localhost:9500/prompts \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "agent-researcher",
+    "template": "You are a research agent specialized in {domain}. Find accurate information.",
+    "variables": ["domain"],
+    "tags": ["research"]
+  }'
+```
+
+This saves the prompt locally **and** syncs it to LiteLLM in dotprompt format.
+
+**Step 2** — Reference it by name in the agent role:
+
+```bash
+curl -X POST http://localhost:9500/agents \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Research Pipeline",
+    "description": "Sequential: researcher then analyzer",
+    "url": "http://my-agent:9100",
+    "execution_type": "sequential",
+    "roles": [
+      {"name": "researcher", "prompt_ref": "agent-researcher", "tools": ["Bash", "Read"]},
+      {"name": "analyzer", "prompt_inline": "Analyze the research results.", "tools": ["Bash", "Read"]}
+    ]
+  }'
+```
+
+Note: you can mix `prompt_ref` and `prompt_inline` in the same agent.
+
+### How the agent resolves prompts at startup
+
+When `cs-agent-service` starts with `AGENT_ID`, it fetches the agent config and resolves each role's prompt in this order:
+
+```
+1. prompt_inline  → use it directly (no network call)
+2. prompt_ref     → try LiteLLM first (GET /prompts/{name}/info)
+3. prompt_ref     → fallback to Registry API (GET /prompts/{name})
+4. local file     → /app/prompts/{role}.txt
+5. default        → "You are a {role} agent."
+```
+
+### When to use which
+
+| Scenario | Use | Why |
+|----------|-----|-----|
+| One agent, one prompt | `prompt_inline` | Simple, no extra API calls |
+| Same prompt in multiple agents | `prompt_ref` | Change once, all agents pick it up on restart |
+| Prompt versioning via LiteLLM | `prompt_ref` | LiteLLM tracks versions automatically |
+| Quick prototype | `prompt_inline` | Fastest path, zero setup |
+
+### Updating a shared prompt
+
+```bash
+curl -X PUT http://localhost:9500/prompts/agent-researcher \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "agent-researcher",
+    "template": "You are a senior research agent. Be thorough and cite sources.",
+    "tags": ["research"]
+  }'
+```
+
+The version auto-increments and syncs to LiteLLM. Agents pick up the new prompt on their next restart.
 
 ## Skills, Tools & RAGs Injection
 
