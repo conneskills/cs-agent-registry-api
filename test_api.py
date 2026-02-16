@@ -198,17 +198,27 @@ async def test_create_prompt(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "created"
-    assert "prompt_id" in data
+    assert data["prompt_id"] == "Greeting"  # name IS the key
     assert data["prompt"]["version"] == 1
 
 
 @pytest.mark.asyncio
-async def test_get_prompt(client):
-    resp = await client.post("/prompts", json={"name": "Test", "template": "Hi"})
-    prompt_id = resp.json()["prompt_id"]
-    resp = await client.get(f"/prompts/{prompt_id}")
+async def test_create_prompt_duplicate_name(client):
+    """Duplicate prompt names should be rejected."""
+    await client.post("/prompts", json={"name": "dup-prompt", "template": "V1"})
+    resp = await client.post("/prompts", json={"name": "dup-prompt", "template": "V2"})
+    assert resp.status_code == 400
+    assert "already exists" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_get_prompt_by_name(client):
+    """Prompts are retrieved by name — this is how cs-agent-service resolves prompt_ref."""
+    await client.post("/prompts", json={"name": "agent-researcher", "template": "You are a researcher."})
+    resp = await client.get("/prompts/agent-researcher")
     assert resp.status_code == 200
-    assert resp.json()["name"] == "Test"
+    assert resp.json()["name"] == "agent-researcher"
+    assert resp.json()["template"] == "You are a researcher."
 
 
 @pytest.mark.asyncio
@@ -219,11 +229,13 @@ async def test_get_prompt_not_found(client):
 
 @pytest.mark.asyncio
 async def test_update_prompt(client):
-    resp = await client.post("/prompts", json={"name": "V1", "template": "Version 1"})
-    prompt_id = resp.json()["prompt_id"]
-    resp = await client.put(f"/prompts/{prompt_id}", json={"name": "V2", "template": "Version 2"})
+    await client.post("/prompts", json={"name": "updatable", "template": "Version 1"})
+    resp = await client.put("/prompts/updatable", json={"name": "updatable", "template": "Version 2"})
     assert resp.status_code == 200
     assert resp.json()["version"] == 2
+    # Verify content updated
+    resp = await client.get("/prompts/updatable")
+    assert resp.json()["template"] == "Version 2"
 
 
 @pytest.mark.asyncio
@@ -250,12 +262,69 @@ async def test_list_prompts_filter_by_tag(client):
 
 @pytest.mark.asyncio
 async def test_delete_prompt(client):
-    resp = await client.post("/prompts", json={"name": "Del", "template": "Del"})
-    prompt_id = resp.json()["prompt_id"]
-    resp = await client.delete(f"/prompts/{prompt_id}")
+    await client.post("/prompts", json={"name": "to-delete", "template": "Del"})
+    resp = await client.delete("/prompts/to-delete")
     assert resp.status_code == 200
-    resp = await client.get(f"/prompts/{prompt_id}")
+    resp = await client.get("/prompts/to-delete")
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_prompt_ref_flow(client):
+    """End-to-end: create prompt by name, reference it in agent role, retrieve by name."""
+    # 1. Create prompt with a name that matches a prompt_ref
+    await client.post("/prompts", json={
+        "name": "agent-researcher",
+        "template": "You are a research agent specialized in {domain}.",
+        "variables": ["domain"],
+        "tags": ["agent"],
+    })
+
+    # 2. Create agent with role referencing that prompt
+    resp = await client.post("/agents", json={
+        "name": "Research Pipeline",
+        "description": "Sequential pipeline",
+        "url": "http://localhost:9100",
+        "execution_type": "sequential",
+        "roles": [
+            {"name": "researcher", "prompt_ref": "agent-researcher"},
+        ],
+    })
+    assert resp.status_code == 200
+    agent = resp.json()["agent"]
+    assert agent["runtime_config"]["roles"][0]["prompt_ref"] == "agent-researcher"
+
+    # 3. Simulate what cs-agent-service does: GET /prompts/{prompt_ref}
+    resp = await client.get("/prompts/agent-researcher")
+    assert resp.status_code == 200
+    assert resp.json()["template"] == "You are a research agent specialized in {domain}."
+
+
+# ============================================================================
+# DOTPROMPT BUILD
+# ============================================================================
+
+def test_build_dotprompt():
+    from main import _build_dotprompt
+    prompt_data = {
+        "name": "agent-researcher",
+        "description": "A research prompt",
+        "tags": ["agent", "research"],
+        "template": "You are a researcher.",
+    }
+    result = _build_dotprompt(prompt_data)
+    assert result.startswith("---\n")
+    assert "name: agent-researcher" in result
+    assert "description: A research prompt" in result
+    assert "tags: [agent, research]" in result
+    assert result.endswith("---\nYou are a researcher.")
+
+
+def test_build_dotprompt_minimal():
+    from main import _build_dotprompt
+    result = _build_dotprompt({"name": "simple", "template": "Hello"})
+    assert "name: simple" in result
+    assert result.endswith("---\nHello")
 
 
 # ============================================================================

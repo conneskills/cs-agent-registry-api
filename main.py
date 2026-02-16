@@ -425,8 +425,15 @@ async def list_prompts(
 
 @app.post("/prompts")
 async def create_prompt(prompt: PromptCreate, api_key: str = Depends(get_api_key)):
-    """Create a new prompt."""
-    prompt_id = str(uuid.uuid4())
+    """Create a new prompt. Uses name as the primary key (prompt_id).
+
+    This allows cs-agent-service to resolve prompt_ref by name:
+      GET /prompts/agent-researcher
+    """
+    prompt_id = prompt.name  # name IS the key for prompt_ref resolution
+    if await storage.exists("prompts", prompt_id):
+        raise HTTPException(status_code=400, detail="Prompt with this name already exists")
+
     now = datetime.utcnow().isoformat()
 
     prompt_data = prompt.model_dump()
@@ -437,7 +444,7 @@ async def create_prompt(prompt: PromptCreate, api_key: str = Depends(get_api_key
 
     await storage.put("prompts", prompt_id, prompt_data)
 
-    # Sync to LiteLLM Prompt Management
+    # Sync to LiteLLM Prompt Management in dotprompt format
     await sync_prompt_to_litellm(prompt_data)
 
     return {"status": "created", "prompt_id": prompt_id, "prompt": prompt_data}
@@ -445,7 +452,11 @@ async def create_prompt(prompt: PromptCreate, api_key: str = Depends(get_api_key
 
 @app.get("/prompts/{prompt_id}")
 async def get_prompt(prompt_id: str, api_key: str = Depends(get_api_key)):
-    """Get prompt by ID."""
+    """Get prompt by name (prompt_id = name).
+
+    cs-agent-service calls GET /prompts/{prompt_ref} where prompt_ref
+    is the name used in role config (e.g. "agent-researcher").
+    """
     prompt = await storage.get("prompts", prompt_id)
     if not prompt:
         raise HTTPException(status_code=404, detail="Prompt not found")
