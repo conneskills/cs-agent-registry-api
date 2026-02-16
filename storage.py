@@ -27,7 +27,7 @@ class StorageBackend(Protocol):
     async def exists(self, entity: str, key: str) -> bool: ...
 
 
-ENTITIES = ("skills", "tools", "rag_configs", "agents", "architectures", "prompts")
+ENTITIES = ("skills", "tools", "rag_configs", "agents", "architectures")
 
 
 # ---------------------------------------------------------------------------

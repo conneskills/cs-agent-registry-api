@@ -8,8 +8,7 @@ Provides CRUD endpoints for:
 
 | Entity | Endpoint | Description |
 |--------|----------|-------------|
-| **Agents** | `/agents` | Agent cards with runtime config (execution type, roles, prompts) |
-| **Prompts** | `/prompts` | Reusable prompt templates with variables |
+| **Agents** | `/agents` | Agent cards with runtime config (execution type, roles) |
 | **Skills** | `/skills` | Skill definitions for agent discovery |
 | **Tools** | `/tools` | Tool definitions (MCP, OpenAPI, custom) |
 | **RAG** | `/rag` | RAG configurations (vector stores, web search, etc.) |
@@ -22,13 +21,14 @@ Provides CRUD endpoints for:
                     cs-agent-registry-api (:9500)
                     ┌──────────────────────┐
                     │  POST /agents        │
-  Create agent ────>│  POST /prompts       │
-  config via API    │  GET  /agents/{id}   │<──── Agent containers read
-                    └──────────────────────┘      config at startup
+  Create agent ────>│  GET  /agents/{id}   │<──── Agent containers read
+  config via API    │  PATCH /agents/{id}/ │      config at startup
+                    │        url           │
+                    └──────────────────────┘
                               │
                     ┌─────────┴─────────┐
-                    │  cs-agent-service  │
-                    │  (N containers)    │
+                    │  cs-agent-service  │──── Prompts from LiteLLM
+                    │  (N containers)    │     (GET /prompts/{ref}/info)
                     │  AGENT_ID=xxx      │
                     └───────────────────-┘
 ```
@@ -59,11 +59,11 @@ curl http://localhost:9500/health
 
 ## Prompts
 
-There are two ways to give a prompt to an agent role: **inline** (simple) or **by reference** (shared/versioned).
+Prompts are managed in **LiteLLM**, not in the registry. The registry only stores agent config with `prompt_ref` or `prompt_inline` — the actual prompt resolution happens at runtime in `cs-agent-service`.
 
 ### Option A: Inline prompt (simplest)
 
-Put the prompt directly in the role. No extra steps needed.
+Put the prompt directly in the role config. No external dependencies.
 
 ```bash
 curl -X POST http://localhost:9500/agents \
@@ -71,48 +71,40 @@ curl -X POST http://localhost:9500/agents \
   -d '{
     "name": "My Agent",
     "description": "Simple agent with inline prompt",
-    "url": "http://my-agent:9100",
     "execution_type": "single",
     "roles": [
       {
         "name": "researcher",
-        "prompt_inline": "You are a research agent. Find accurate information about the given topic.",
+        "prompt_inline": "You are a research agent. Find accurate information.",
         "tools": ["Bash", "Read", "WebSearch"]
       }
     ]
   }'
 ```
 
-That's it. The agent container reads this config and uses the prompt directly.
+### Option B: Prompt reference via LiteLLM
 
-### Option B: Prompt reference (shared across agents)
-
-Use this when multiple agents share the same prompt, or when you want to update a prompt without redeploying agents.
-
-**Step 1** — Create the prompt (the `name` is the key):
+Create the prompt directly in LiteLLM, then reference it by name in the agent role.
 
 ```bash
-curl -X POST http://localhost:9500/prompts \
+# 1. Create prompt in LiteLLM (dotprompt format)
+curl -X POST https://litellm.example.com/prompts \
+  -H "Authorization: Bearer $LITELLM_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "agent-researcher",
-    "template": "You are a research agent specialized in {domain}. Find accurate information.",
-    "variables": ["domain"],
-    "tags": ["research"]
+    "prompt_id": "agent-researcher",
+    "litellm_params": {
+      "prompt_integration": "dotprompt",
+      "dotprompt_content": "---\nname: agent-researcher\n---\nYou are a research agent specialized in {domain}."
+    }
   }'
-```
 
-This saves the prompt locally **and** syncs it to LiteLLM in dotprompt format.
-
-**Step 2** — Reference it by name in the agent role:
-
-```bash
+# 2. Reference it in the agent role
 curl -X POST http://localhost:9500/agents \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Research Pipeline",
-    "description": "Sequential: researcher then analyzer",
-    "url": "http://my-agent:9100",
+    "description": "Sequential pipeline",
     "execution_type": "sequential",
     "roles": [
       {"name": "researcher", "prompt_ref": "agent-researcher", "tools": ["Bash", "Read"]},
@@ -121,42 +113,16 @@ curl -X POST http://localhost:9500/agents \
   }'
 ```
 
-Note: you can mix `prompt_ref` and `prompt_inline` in the same agent.
-
-### How the agent resolves prompts at startup
-
-When `cs-agent-service` starts with `AGENT_ID`, it fetches the agent config and resolves each role's prompt in this order:
+### How cs-agent-service resolves prompts at runtime
 
 ```
-1. prompt_inline  → use it directly (no network call)
-2. prompt_ref     → try LiteLLM first (GET /prompts/{name}/info)
-3. prompt_ref     → fallback to Registry API (GET /prompts/{name})
-4. local file     → /app/prompts/{role}.txt
-5. default        → "You are a {role} agent."
+1. prompt_inline  → use directly (no network call)
+2. prompt_ref     → LiteLLM (GET /prompts/{name}/info)
+3. local file     → /app/prompts/{role}.txt
+4. default        → "You are a {role} agent."
 ```
 
-### When to use which
-
-| Scenario | Use | Why |
-|----------|-----|-----|
-| One agent, one prompt | `prompt_inline` | Simple, no extra API calls |
-| Same prompt in multiple agents | `prompt_ref` | Change once, all agents pick it up on restart |
-| Prompt versioning via LiteLLM | `prompt_ref` | LiteLLM tracks versions automatically |
-| Quick prototype | `prompt_inline` | Fastest path, zero setup |
-
-### Updating a shared prompt
-
-```bash
-curl -X PUT http://localhost:9500/prompts/agent-researcher \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "agent-researcher",
-    "template": "You are a senior research agent. Be thorough and cite sources.",
-    "tags": ["research"]
-  }'
-```
-
-The version auto-increments and syncs to LiteLLM. Agents pick up the new prompt on their next restart.
+The registry is not involved in prompt resolution. LiteLLM owns prompts.
 
 ## Skills, Tools & RAGs Injection
 
@@ -247,21 +213,51 @@ curl "http://localhost:9500/discover?query=translate+this+to+Spanish"
 
 The `SkillMatcher` scores each agent's skills against the query by checking skill names, descriptions, tags, and examples. The agent with the highest-scoring skills is returned.
 
+## Architecture (Production)
+
+The registry is a stateless microservice. The database is a separate service.
+
+```
+┌──────────────────────┐       ┌──────────────────┐
+│  cs-agent-registry   │──────>│  Cloud SQL (PG)  │
+│  Cloud Run :9500     │       │  Managed DB      │
+│  (stateless)         │       └──────────────────┘
+└──────────────────────┘
+         │
+         ├── cs-agent-service (:9100) reads config at startup
+         └── LiteLLM registers public agents
+```
+
 ## Storage
 
 | Mode | Config | Description |
 |------|--------|-------------|
-| **Memory** | _(default)_ | In-memory, data lost on restart |
-| **PostgreSQL** | `DATABASE_URL=postgresql+asyncpg://...` | Persistent, uses `registry` schema |
+| **Memory** | _(default, dev only)_ | In-memory, data lost on restart |
+| **PostgreSQL** | `DATABASE_URL=postgresql+asyncpg://...` | **Required for production**, uses `registry` schema |
+
+The PostgreSQL database should be a managed service (Cloud SQL, RDS, etc.), not running in the same container.
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_URL` | _(none)_ | PostgreSQL connection (enables persistence) |
+| `DATABASE_URL` | _(none)_ | PostgreSQL connection (**required in production**) |
 | `LITELLM_URL` | `http://litellm:4000` | LiteLLM endpoint for agent registration |
-| `LITELLM_MASTER_KEY` | _(none)_ | LiteLLM master key |
+| `LITELLM_MASTER_KEY` | _(none)_ | LiteLLM master key (Secret Manager) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | _(none)_ | Phoenix/OTLP tracing (optional, see below) |
+
+## Deployment
+
+Deployed to Cloud Run via Cloud Build. Secrets come from Secret Manager.
+
+```bash
+# Secrets required in GCP Secret Manager:
+# - registry-database-url    → postgresql+asyncpg://user:pass@/registry?host=/cloudsql/project:region:instance
+# - litellm-master-key       → sk-...
+
+# Trigger build + deploy
+gcloud builds submit --config cloudbuild.yaml
+```
 
 ## Observability (Optional)
 

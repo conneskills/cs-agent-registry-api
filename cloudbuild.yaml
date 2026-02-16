@@ -1,22 +1,45 @@
 steps:
-- name: gcr.io/cloud-builders/docker
-  args:
-  - build
-  - -t
-  - us-central1-docker.pkg.dev/$PROJECT_ID/cs-agent-registry-api/cs-agent-registry-api:$COMMIT_SHA
-  - -t
-  - us-central1-docker.pkg.dev/$PROJECT_ID/cs-agent-registry-api/cs-agent-registry-api:latest
-  - -f
-  - Dockerfile
-  - .
-- name: gcr.io/cloud-builders/docker
-  args:
-  - push
-  - --all-tags
-  - us-central1-docker.pkg.dev/$PROJECT_ID/cs-agent-registry-api/cs-agent-registry-api
+  # Build
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - us-central1-docker.pkg.dev/$PROJECT_ID/cs-agent-registry-api/cs-agent-registry-api:$COMMIT_SHA
+      - -t
+      - us-central1-docker.pkg.dev/$PROJECT_ID/cs-agent-registry-api/cs-agent-registry-api:latest
+      - -f
+      - Dockerfile
+      - .
+
+  # Push
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - --all-tags
+      - us-central1-docker.pkg.dev/$PROJECT_ID/cs-agent-registry-api/cs-agent-registry-api
+
+  # Deploy to Cloud Run
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - cs-agent-registry-api
+      - --image=us-central1-docker.pkg.dev/$PROJECT_ID/cs-agent-registry-api/cs-agent-registry-api:$COMMIT_SHA
+      - --region=us-central1
+      - --port=9500
+      - --allow-unauthenticated
+      - --set-env-vars=LITELLM_URL=${_LITELLM_URL}
+      - --set-secrets=DATABASE_URL=registry-database-url:latest,LITELLM_MASTER_KEY=litellm-master-key:latest
+
 images:
-- us-central1-docker.pkg.dev/$PROJECT_ID/cs-agent-registry-api/cs-agent-registry-api:$COMMIT_SHA
-- us-central1-docker.pkg.dev/$PROJECT_ID/cs-agent-registry-api/cs-agent-registry-api:latest
+  - us-central1-docker.pkg.dev/$PROJECT_ID/cs-agent-registry-api/cs-agent-registry-api:$COMMIT_SHA
+  - us-central1-docker.pkg.dev/$PROJECT_ID/cs-agent-registry-api/cs-agent-registry-api:latest
+
+substitutions:
+  _LITELLM_URL: "https://litellm.conneskills.com"
+
 options:
   logging: CLOUD_LOGGING_ONLY
+
 timeout: 1200s

@@ -127,19 +127,10 @@ class RAGCreate(BaseModel):
     metadata: dict = {}
 
 
-class PromptCreate(BaseModel):
-    name: str
-    description: str = ""
-    template: str  # The prompt text, may contain {variables}
-    variables: list[str] = []  # Expected variable names
-    tags: list[str] = []
-    metadata: dict = {}
-
-
 class AgentCreate(BaseModel):
     name: str
     description: str
-    url: str
+    url: str = ""  # Optional: set after deployment to break circular dependency
     version: str = "1.0.0"
     agent_type: str = "general"
 
@@ -408,91 +399,6 @@ async def delete_rag_config(rag_id: str, api_key: str = Depends(get_api_key)):
 
 
 # ============================================================================
-# PROMPTS ENDPOINTS
-# ============================================================================
-
-@app.get("/prompts")
-async def list_prompts(
-    tag: Optional[str] = Query(None),
-    api_key: str = Depends(get_api_key),
-):
-    """List all prompts."""
-    prompts = await storage.list_all("prompts")
-    if tag:
-        prompts = [p for p in prompts if tag.lower() in [t.lower() for t in p.get("tags", [])]]
-    return {"prompts": prompts, "count": len(prompts)}
-
-
-@app.post("/prompts")
-async def create_prompt(prompt: PromptCreate, api_key: str = Depends(get_api_key)):
-    """Create a new prompt. Uses name as the primary key (prompt_id).
-
-    This allows cs-agent-service to resolve prompt_ref by name:
-      GET /prompts/agent-researcher
-    """
-    prompt_id = prompt.name  # name IS the key for prompt_ref resolution
-    if await storage.exists("prompts", prompt_id):
-        raise HTTPException(status_code=400, detail="Prompt with this name already exists")
-
-    now = datetime.utcnow().isoformat()
-
-    prompt_data = prompt.model_dump()
-    prompt_data["prompt_id"] = prompt_id
-    prompt_data["version"] = 1
-    prompt_data["created_at"] = now
-    prompt_data["updated_at"] = now
-
-    await storage.put("prompts", prompt_id, prompt_data)
-
-    # Sync to LiteLLM Prompt Management in dotprompt format
-    await sync_prompt_to_litellm(prompt_data)
-
-    return {"status": "created", "prompt_id": prompt_id, "prompt": prompt_data}
-
-
-@app.get("/prompts/{prompt_id}")
-async def get_prompt(prompt_id: str, api_key: str = Depends(get_api_key)):
-    """Get prompt by name (prompt_id = name).
-
-    cs-agent-service calls GET /prompts/{prompt_ref} where prompt_ref
-    is the name used in role config (e.g. "agent-researcher").
-    """
-    prompt = await storage.get("prompts", prompt_id)
-    if not prompt:
-        raise HTTPException(status_code=404, detail="Prompt not found")
-    return prompt
-
-
-@app.put("/prompts/{prompt_id}")
-async def update_prompt(prompt_id: str, prompt: PromptCreate, api_key: str = Depends(get_api_key)):
-    """Update a prompt (auto-increments version)."""
-    existing = await storage.get("prompts", prompt_id)
-    if not existing:
-        raise HTTPException(status_code=404, detail="Prompt not found")
-
-    prompt_data = prompt.model_dump()
-    prompt_data["prompt_id"] = prompt_id
-    prompt_data["version"] = existing.get("version", 1) + 1
-    prompt_data["created_at"] = existing.get("created_at")
-    prompt_data["updated_at"] = datetime.utcnow().isoformat()
-
-    await storage.put("prompts", prompt_id, prompt_data)
-
-    # Sync update to LiteLLM (creates new version)
-    await sync_prompt_to_litellm(prompt_data, is_update=True)
-
-    return {"status": "updated", "prompt_id": prompt_id, "version": prompt_data["version"]}
-
-
-@app.delete("/prompts/{prompt_id}")
-async def delete_prompt(prompt_id: str, api_key: str = Depends(get_api_key)):
-    """Delete a prompt."""
-    if not await storage.delete("prompts", prompt_id):
-        raise HTTPException(status_code=404, detail="Prompt not found")
-    return {"status": "deleted", "prompt_id": prompt_id}
-
-
-# ============================================================================
 # AGENTS ENDPOINTS
 # ============================================================================
 
@@ -679,6 +585,33 @@ async def update_agent(
     await storage.put("agents", agent_id, to_dict(existing))
 
     return {"status": "updated", "agent_id": agent_id}
+
+
+class AgentUrlUpdate(BaseModel):
+    url: str
+
+
+@app.patch("/agents/{agent_id}/url")
+async def update_agent_url(
+    agent_id: str,
+    body: AgentUrlUpdate,
+    api_key: str = Depends(get_api_key),
+):
+    """Update only the agent URL. Used after deployment to break the circular dependency:
+
+    1. POST /agents (no url) → get agent_id
+    2. Deploy container with AGENT_ID=agent_id
+    3. PATCH /agents/{id}/url with the deployed URL
+    """
+    agent = await storage.get("agents", agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    agent["url"] = body.url
+    agent["updated_at"] = datetime.utcnow().isoformat()
+    await storage.put("agents", agent_id, agent)
+
+    return {"status": "updated", "agent_id": agent_id, "url": body.url}
 
 
 @app.delete("/agents/{agent_id}")
@@ -871,85 +804,6 @@ async def invoke_agent(agent_url: str, query: str) -> dict:
             span.set_attribute("error", True)
             span.set_attribute("error.message", str(e))
             return {"status": "error", "error": str(e)}
-
-
-def _build_dotprompt(prompt_data: dict) -> str:
-    """Build dotprompt content from registry prompt data."""
-    name = prompt_data.get("name", "")
-    description = prompt_data.get("description", "")
-    tags = prompt_data.get("tags", [])
-    template = prompt_data.get("template", "")
-
-    frontmatter_lines = [f"name: {name}"]
-    if description:
-        frontmatter_lines.append(f"description: {description}")
-    if tags:
-        frontmatter_lines.append(f"tags: [{', '.join(tags)}]")
-
-    frontmatter = "\n".join(frontmatter_lines)
-    return f"---\n{frontmatter}\n---\n{template}"
-
-
-async def sync_prompt_to_litellm(prompt_data: dict, is_update: bool = False):
-    """Sync a prompt to LiteLLM Prompt Management API.
-
-    - Create: POST /prompts
-    - Update: PUT /prompts/{prompt_id} (creates new version automatically)
-
-    Uses prompt 'name' as prompt_id in LiteLLM so that role configs
-    can reference it via prompt_ref (e.g. "agent-researcher").
-    """
-    if not MASTER_KEY:
-        logger.debug("LITELLM_MASTER_KEY not set, skipping prompt sync")
-        return
-
-    prompt_name = prompt_data.get("name", "")
-    if not prompt_name:
-        return
-
-    dotprompt_content = _build_dotprompt(prompt_data)
-
-    payload = {
-        "prompt_id": prompt_name,
-        "litellm_params": {
-            "prompt_id": prompt_name,
-            "prompt_integration": "dotprompt",
-            "dotprompt_content": dotprompt_content,
-        },
-    }
-
-    headers = {
-        "Authorization": f"Bearer {MASTER_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            if is_update:
-                # PUT creates a new version in LiteLLM
-                async with session.put(
-                    f"{LITELLM_URL}/prompts/{prompt_name}",
-                    json=payload,
-                    headers=headers,
-                ) as resp:
-                    if resp.status == 200:
-                        logger.info(f"Prompt '{prompt_name}' updated in LiteLLM")
-                    else:
-                        body = await resp.text()
-                        logger.warning(f"LiteLLM prompt update failed ({resp.status}): {body}")
-            else:
-                async with session.post(
-                    f"{LITELLM_URL}/prompts",
-                    json=payload,
-                    headers=headers,
-                ) as resp:
-                    if resp.status == 200:
-                        logger.info(f"Prompt '{prompt_name}' synced to LiteLLM")
-                    else:
-                        body = await resp.text()
-                        logger.warning(f"LiteLLM prompt sync failed ({resp.status}): {body}")
-    except Exception as e:
-        logger.warning(f"Failed to sync prompt '{prompt_name}' to LiteLLM: {e}")
 
 
 async def register_with_litellm(agent_card: CompleteAgentCard):

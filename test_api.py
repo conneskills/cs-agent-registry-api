@@ -188,146 +188,6 @@ async def test_delete_rag(client):
 
 
 # ============================================================================
-# PROMPTS CRUD
-# ============================================================================
-
-@pytest.mark.asyncio
-async def test_create_prompt(client):
-    payload = {"name": "Greeting", "description": "A greeting prompt", "template": "Hello {name}!", "variables": ["name"]}
-    resp = await client.post("/prompts", json=payload)
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["status"] == "created"
-    assert data["prompt_id"] == "Greeting"  # name IS the key
-    assert data["prompt"]["version"] == 1
-
-
-@pytest.mark.asyncio
-async def test_create_prompt_duplicate_name(client):
-    """Duplicate prompt names should be rejected."""
-    await client.post("/prompts", json={"name": "dup-prompt", "template": "V1"})
-    resp = await client.post("/prompts", json={"name": "dup-prompt", "template": "V2"})
-    assert resp.status_code == 400
-    assert "already exists" in resp.json()["detail"]
-
-
-@pytest.mark.asyncio
-async def test_get_prompt_by_name(client):
-    """Prompts are retrieved by name — this is how cs-agent-service resolves prompt_ref."""
-    await client.post("/prompts", json={"name": "agent-researcher", "template": "You are a researcher."})
-    resp = await client.get("/prompts/agent-researcher")
-    assert resp.status_code == 200
-    assert resp.json()["name"] == "agent-researcher"
-    assert resp.json()["template"] == "You are a researcher."
-
-
-@pytest.mark.asyncio
-async def test_get_prompt_not_found(client):
-    resp = await client.get("/prompts/nonexistent")
-    assert resp.status_code == 404
-
-
-@pytest.mark.asyncio
-async def test_update_prompt(client):
-    await client.post("/prompts", json={"name": "updatable", "template": "Version 1"})
-    resp = await client.put("/prompts/updatable", json={"name": "updatable", "template": "Version 2"})
-    assert resp.status_code == 200
-    assert resp.json()["version"] == 2
-    # Verify content updated
-    resp = await client.get("/prompts/updatable")
-    assert resp.json()["template"] == "Version 2"
-
-
-@pytest.mark.asyncio
-async def test_update_prompt_not_found(client):
-    resp = await client.put("/prompts/nonexistent", json={"name": "X", "template": "X"})
-    assert resp.status_code == 404
-
-
-@pytest.mark.asyncio
-async def test_list_prompts(client):
-    await client.post("/prompts", json={"name": "P1", "template": "T1", "tags": ["greet"]})
-    resp = await client.get("/prompts")
-    assert resp.status_code == 200
-    assert resp.json()["count"] >= 1
-
-
-@pytest.mark.asyncio
-async def test_list_prompts_filter_by_tag(client):
-    await client.post("/prompts", json={"name": "Tagged", "template": "T", "tags": ["special"]})
-    resp = await client.get("/prompts?tag=special")
-    assert resp.status_code == 200
-    assert all("special" in [t.lower() for t in p.get("tags", [])] for p in resp.json()["prompts"])
-
-
-@pytest.mark.asyncio
-async def test_delete_prompt(client):
-    await client.post("/prompts", json={"name": "to-delete", "template": "Del"})
-    resp = await client.delete("/prompts/to-delete")
-    assert resp.status_code == 200
-    resp = await client.get("/prompts/to-delete")
-    assert resp.status_code == 404
-
-
-@pytest.mark.asyncio
-async def test_prompt_ref_flow(client):
-    """End-to-end: create prompt by name, reference it in agent role, retrieve by name."""
-    # 1. Create prompt with a name that matches a prompt_ref
-    await client.post("/prompts", json={
-        "name": "agent-researcher",
-        "template": "You are a research agent specialized in {domain}.",
-        "variables": ["domain"],
-        "tags": ["agent"],
-    })
-
-    # 2. Create agent with role referencing that prompt
-    resp = await client.post("/agents", json={
-        "name": "Research Pipeline",
-        "description": "Sequential pipeline",
-        "url": "http://localhost:9100",
-        "execution_type": "sequential",
-        "roles": [
-            {"name": "researcher", "prompt_ref": "agent-researcher"},
-        ],
-    })
-    assert resp.status_code == 200
-    agent = resp.json()["agent"]
-    assert agent["runtime_config"]["roles"][0]["prompt_ref"] == "agent-researcher"
-
-    # 3. Simulate what cs-agent-service does: GET /prompts/{prompt_ref}
-    resp = await client.get("/prompts/agent-researcher")
-    assert resp.status_code == 200
-    assert resp.json()["template"] == "You are a research agent specialized in {domain}."
-
-
-# ============================================================================
-# DOTPROMPT BUILD
-# ============================================================================
-
-def test_build_dotprompt():
-    from main import _build_dotprompt
-    prompt_data = {
-        "name": "agent-researcher",
-        "description": "A research prompt",
-        "tags": ["agent", "research"],
-        "template": "You are a researcher.",
-    }
-    result = _build_dotprompt(prompt_data)
-    assert result.startswith("---\n")
-    assert "name: agent-researcher" in result
-    assert "description: A research prompt" in result
-    assert "tags: [agent, research]" in result
-    assert result.endswith("---\nYou are a researcher.")
-
-
-def test_build_dotprompt_minimal():
-    from main import _build_dotprompt
-    result = _build_dotprompt({"name": "simple", "template": "Hello"})
-    assert "name: simple" in result
-    assert result.endswith("---\nHello")
-
-
-# ============================================================================
 # AGENTS CRUD
 # ============================================================================
 
@@ -472,6 +332,40 @@ async def test_create_agent_with_runtime_config(client):
     assert agent["runtime_config"] is not None
     assert agent["runtime_config"]["execution_type"] == "sequential"
     assert len(agent["runtime_config"]["roles"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_create_agent_without_url(client):
+    """Agents can be created without url to break the circular dependency."""
+    resp = await client.post("/agents", json={"name": "No URL Agent", "description": "Config first"})
+    assert resp.status_code == 200
+    agent_id = resp.json()["agent_id"]
+    agent = resp.json()["agent"]
+    assert agent["url"] == ""
+    assert agent_id is not None
+
+
+@pytest.mark.asyncio
+async def test_patch_agent_url(client):
+    """Two-phase flow: create config → deploy → patch URL."""
+    # 1. Register config (no url)
+    resp = await client.post("/agents", json={"name": "Deploy Me", "description": "Pending deploy"})
+    agent_id = resp.json()["agent_id"]
+
+    # 2. After deploy, set the URL
+    resp = await client.patch(f"/agents/{agent_id}/url", json={"url": "https://my-agent-xyz.run.app"})
+    assert resp.status_code == 200
+    assert resp.json()["url"] == "https://my-agent-xyz.run.app"
+
+    # 3. Verify it persisted
+    resp = await client.get(f"/agents/{agent_id}")
+    assert resp.json()["url"] == "https://my-agent-xyz.run.app"
+
+
+@pytest.mark.asyncio
+async def test_patch_agent_url_not_found(client):
+    resp = await client.patch("/agents/nonexistent/url", json={"url": "http://x"})
+    assert resp.status_code == 404
 
 
 # ============================================================================

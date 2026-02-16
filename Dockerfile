@@ -2,18 +2,8 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir \
-    fastapi \
-    uvicorn \
-    aiohttp \
-    httpx \
-    pydantic
-
-# Optional: install these for PostgreSQL persistence
-# RUN pip install --no-cache-dir asyncpg "sqlalchemy[asyncio]"
-
-# Optional: install these for Phoenix/OTEL tracing
-# RUN pip install --no-cache-dir opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-grpc
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY models/ /app/models/
 COPY storage.py /app/
