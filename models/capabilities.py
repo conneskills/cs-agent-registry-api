@@ -224,7 +224,7 @@ class CompleteAgentCard(BaseModel):
     agent_type: AgentType = AgentType.GENERAL
     
     # Protocol
-    protocol_version: str = "1.0"
+    protocol_version: str = "0.3.0"
     
     # I/O Modes
     default_input_modes: list[str] = ["text"]

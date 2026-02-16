@@ -246,7 +246,7 @@ def from_dict(data: dict) -> CompleteAgentCard:
         url=data.get("url", ""),
         version=data.get("version", "1.0.0"),
         agent_type=data.get("agent_type", "general"),
-        protocol_version=data.get("protocol_version", "1.0"),
+        protocol_version=data.get("protocol_version", "0.3.0"),
         default_input_modes=data.get("default_input_modes", ["text"]),
         default_output_modes=data.get("default_output_modes", ["text"]),
         capabilities=Capabilities(**data.get("capabilities", {})) if data.get("capabilities") else Capabilities(),
@@ -811,11 +811,12 @@ async def invoke_agent(agent_url: str, query: str) -> dict:
     payload = {
         "jsonrpc": "2.0",
         "id": str(uuid.uuid4()),
-        "method": "tasks/send",
+        "method": "message/send",
         "params": {
             "message": {
                 "role": "user",
-                "parts": [{"kind": "text", "text": query}]
+                "parts": [{"kind": "text", "text": query}],
+                "messageId": str(uuid.uuid4()),
             }
         }
     }
@@ -826,7 +827,7 @@ async def invoke_agent(agent_url: str, query: str) -> dict:
         "a2a.invoke_agent",
         attributes={
             "agent.url": agent_url,
-            "a2a.method": "tasks/send",
+            "a2a.method": "message/send",
         },
     ) as span:
         try:
