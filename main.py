@@ -436,6 +436,10 @@ async def create_prompt(prompt: PromptCreate, api_key: str = Depends(get_api_key
     prompt_data["updated_at"] = now
 
     await storage.put("prompts", prompt_id, prompt_data)
+
+    # Sync to LiteLLM Prompt Management
+    await sync_prompt_to_litellm(prompt_data)
+
     return {"status": "created", "prompt_id": prompt_id, "prompt": prompt_data}
 
 
@@ -462,6 +466,10 @@ async def update_prompt(prompt_id: str, prompt: PromptCreate, api_key: str = Dep
     prompt_data["updated_at"] = datetime.utcnow().isoformat()
 
     await storage.put("prompts", prompt_id, prompt_data)
+
+    # Sync update to LiteLLM (creates new version)
+    await sync_prompt_to_litellm(prompt_data, is_update=True)
+
     return {"status": "updated", "prompt_id": prompt_id, "version": prompt_data["version"]}
 
 
@@ -852,6 +860,85 @@ async def invoke_agent(agent_url: str, query: str) -> dict:
             span.set_attribute("error", True)
             span.set_attribute("error.message", str(e))
             return {"status": "error", "error": str(e)}
+
+
+def _build_dotprompt(prompt_data: dict) -> str:
+    """Build dotprompt content from registry prompt data."""
+    name = prompt_data.get("name", "")
+    description = prompt_data.get("description", "")
+    tags = prompt_data.get("tags", [])
+    template = prompt_data.get("template", "")
+
+    frontmatter_lines = [f"name: {name}"]
+    if description:
+        frontmatter_lines.append(f"description: {description}")
+    if tags:
+        frontmatter_lines.append(f"tags: [{', '.join(tags)}]")
+
+    frontmatter = "\n".join(frontmatter_lines)
+    return f"---\n{frontmatter}\n---\n{template}"
+
+
+async def sync_prompt_to_litellm(prompt_data: dict, is_update: bool = False):
+    """Sync a prompt to LiteLLM Prompt Management API.
+
+    - Create: POST /prompts
+    - Update: PUT /prompts/{prompt_id} (creates new version automatically)
+
+    Uses prompt 'name' as prompt_id in LiteLLM so that role configs
+    can reference it via prompt_ref (e.g. "agent-researcher").
+    """
+    if not MASTER_KEY:
+        logger.debug("LITELLM_MASTER_KEY not set, skipping prompt sync")
+        return
+
+    prompt_name = prompt_data.get("name", "")
+    if not prompt_name:
+        return
+
+    dotprompt_content = _build_dotprompt(prompt_data)
+
+    payload = {
+        "prompt_id": prompt_name,
+        "litellm_params": {
+            "prompt_id": prompt_name,
+            "prompt_integration": "dotprompt",
+            "dotprompt_content": dotprompt_content,
+        },
+    }
+
+    headers = {
+        "Authorization": f"Bearer {MASTER_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            if is_update:
+                # PUT creates a new version in LiteLLM
+                async with session.put(
+                    f"{LITELLM_URL}/prompts/{prompt_name}",
+                    json=payload,
+                    headers=headers,
+                ) as resp:
+                    if resp.status == 200:
+                        logger.info(f"Prompt '{prompt_name}' updated in LiteLLM")
+                    else:
+                        body = await resp.text()
+                        logger.warning(f"LiteLLM prompt update failed ({resp.status}): {body}")
+            else:
+                async with session.post(
+                    f"{LITELLM_URL}/prompts",
+                    json=payload,
+                    headers=headers,
+                ) as resp:
+                    if resp.status == 200:
+                        logger.info(f"Prompt '{prompt_name}' synced to LiteLLM")
+                    else:
+                        body = await resp.text()
+                        logger.warning(f"LiteLLM prompt sync failed ({resp.status}): {body}")
+    except Exception as e:
+        logger.warning(f"Failed to sync prompt '{prompt_name}' to LiteLLM: {e}")
 
 
 async def register_with_litellm(agent_card: CompleteAgentCard):
